@@ -7,7 +7,7 @@ from PIL import Image
 # --- Page Configuration ---
 st.set_page_config(
     page_title="PDF Compressor Pro",
-    page_icon="📄",
+    page_icon="�",
     layout="centered",
     initial_sidebar_state="auto",
 )
@@ -86,7 +86,8 @@ def main():
         
         if stats.get('error'):
             st.error(stats['error'])
-        else:
+        # Check if compression was successful before showing metrics
+        elif stats.get('compressed_size_str'):
             col1, col2, col3 = st.columns(3)
             col1.metric("Original Size", stats['original_size_str'])
             col2.metric("Compressed Size", stats['compressed_size_str'])
@@ -100,13 +101,15 @@ def main():
                     file_name=f"{original_name}_compressed.pdf",
                     mime="application/pdf",
                 )
-            elif stats.get('info'):
-                st.info(stats['info'])
+        # Handle the case where the file was already optimized
+        elif stats.get('info'):
+            st.info(stats['info'])
+
 
 # --- Helper & Core Logic Functions ---
 def format_bytes(byte_count):
     """Formats bytes into a human-readable string (KB, MB, GB)."""
-    if byte_count == 0:
+    if not isinstance(byte_count, (int, float)) or byte_count <= 0:
         return "0 B"
     size_name = ("B", "KB", "MB", "GB")
     i = int(math.floor(math.log(byte_count, 1024)))
@@ -134,9 +137,10 @@ def compress_pdf(file_obj, mode, quality):
             for name in list(page.images.keys()):
                 try:
                     img_obj = page.images[name]
-                    pil_image = img_obj.as_pil_image()
+                    # Attempt to convert to a PIL Image
+                    pil_image = Image.open(io.BytesIO(img_obj.obj.read_bytes()))
 
-                    # Convert RGBA to RGB as JPEG doesn't support alpha
+                    # Convert RGBA or Palette modes to RGB as JPEG doesn't support alpha
                     if pil_image.mode in ('RGBA', 'P'):
                         pil_image = pil_image.convert('RGB')
 
@@ -150,8 +154,8 @@ def compress_pdf(file_obj, mode, quality):
                     num_images_processed += 1
 
                 except Exception as e:
-                    # Skip images that cause errors (e.g., unsupported formats)
-                    print(f"Skipping an image on page {i+1} due to error: {e}")
+                    # Skip images that cause errors (e.g., unsupported formats, masks)
+                    st.warning(f"Skipped an image on page {i+1} that could not be processed. Info: {e}")
                     continue
 
         # --- Mode-specific optimizations ---
@@ -175,7 +179,7 @@ def compress_pdf(file_obj, mode, quality):
         if compressed_size >= original_size:
             st.session_state.compression_stats = {
                 'original_size_str': format_bytes(original_size),
-                'info': f"This PDF seems to be highly optimized already. The new file size ({format_bytes(compressed_size)}) is not smaller. No images were changed."
+                'info': f"This PDF seems to be highly optimized. New size ({format_bytes(compressed_size)}) is not smaller. Processed {num_images_processed} image(s)."
             }
             st.session_state.compressed_pdf = None
         else:
