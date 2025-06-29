@@ -13,8 +13,8 @@ st.set_page_config(
 )
 
 # --- App State Management ---
-# Using session state to hold data across reruns
 def initialize_state():
+    """Initializes session state variables to persist data across reruns."""
     if 'compressed_pdf' not in st.session_state:
         st.session_state.compressed_pdf = None
     if 'original_filename' not in st.session_state:
@@ -22,8 +22,8 @@ def initialize_state():
     if 'compression_stats' not in st.session_state:
         st.session_state.compression_stats = {}
 
-# Function to reset the state when a new file is uploaded
 def reset_state():
+    """Resets the session state when a new file is uploaded or action is taken."""
     st.session_state.compressed_pdf = None
     st.session_state.original_filename = None
     st.session_state.compression_stats = {}
@@ -34,37 +34,43 @@ def main():
     initialize_state()
 
     st.title("📄 PDF Compressor Pro")
-    st.subheader("Reduce PDF file size by optimizing images within the document.")
+    st.subheader("Reduce PDF file size by downsampling and re-compressing images.")
 
-    # File uploader
     uploaded_file = st.file_uploader(
         "Choose a PDF file to compress",
         type="pdf",
-        on_change=reset_state  # Reset state when a new file is chosen
+        on_change=reset_state
     )
 
     if uploaded_file is not None:
         st.sidebar.header("Compression Settings")
 
-        # Simplified modes with clearer explanations
         mode_settings = {
-            "Balanced": {"quality": 80, "info": "Good balance between size and quality."},
-            "Aggressive": {"quality": 65, "info": "Noticeable quality loss, smaller size."},
-            "Extreme": {"quality": 50, "info": "Significant quality loss, smallest size. Also removes metadata."},
+            "Balanced": {"ppi": 150, "quality": 75, "info": "Good balance between size and quality (150 PPI)."},
+            "Aggressive": {"ppi": 96, "quality": 65, "info": "Smaller size, good for screen viewing (96 PPI)."},
+            "Extreme": {"ppi": 72, "quality": 50, "info": "Smallest size, noticeable quality loss (72 PPI). Also removes metadata."},
         }
 
         compression_mode = st.sidebar.radio(
             "Select a compression mode:",
             options=list(mode_settings.keys()),
             index=0,
-            help="This sets a baseline for image quality."
+            help="This sets a baseline for image resolution and quality."
         )
         
         st.sidebar.info(mode_settings[compression_mode]["info"])
         
-        # More intuitive image quality slider
+        target_ppi = st.sidebar.slider(
+            "Image Resolution (PPI)",
+            min_value=50,
+            max_value=300,
+            value=mode_settings[compression_mode]["ppi"],
+            step=10,
+            help="Pixels Per Inch. Images with a higher resolution will be downsampled to this value."
+        )
+
         image_quality = st.sidebar.slider(
-            "Fine-tune Image Quality (%)",
+            "Image Quality (%)",
             min_value=10,
             max_value=95,
             value=mode_settings[compression_mode]["quality"],
@@ -72,11 +78,10 @@ def main():
             help="The quality of JPEG images after compression. Lower values mean smaller file size."
         )
 
-        # Button to start the compression
         if st.button(f"Compress PDF ({compression_mode})"):
             st.session_state.original_filename = uploaded_file.name
-            with st.spinner("Optimizing images and compressing PDF..."):
-                compress_pdf(uploaded_file, compression_mode, image_quality)
+            with st.spinner("Downsampling images and compressing PDF..."):
+                compress_pdf(uploaded_file, compression_mode, target_ppi, image_quality)
 
     # --- Display Results ---
     if st.session_state.get('compression_stats'):
@@ -84,17 +89,11 @@ def main():
         
         st.header("Compression Results")
         
-        # Priority 1: Check for and display any errors
         if stats.get('error'):
             st.error(stats['error'])
-        
-        # Priority 2: Check for and display info messages (e.g., already optimized)
         elif stats.get('info'):
             st.info(stats['info'])
-        
-        # If no error and no info, then it must be a successful compression
         else:
-            # This block now only runs on success, so all keys should exist.
             col1, col2, col3 = st.columns(3)
             col1.metric("Original Size", stats.get('original_size_str', 'N/A'))
             col2.metric("Compressed Size", stats.get('compressed_size_str', 'N/A'))
@@ -120,13 +119,14 @@ def format_bytes(byte_count):
     s = round(byte_count / p, 2)
     return f"{s} {size_name[i]}"
 
-def compress_pdf(file_obj, mode, quality):
+def compress_pdf(file_obj, mode, target_ppi, quality):
     """
-    Core function to compress a PDF using pikepdf and Pillow.
+    Core function to compress a PDF by downsampling and re-compressing images.
     
     Args:
         file_obj (BytesIO): The uploaded PDF file object.
         mode (str): The selected compression mode.
+        target_ppi (int): The target PPI for downsampling images.
         quality (int): The target JPEG quality for images (1-95).
     """
     try:
@@ -134,42 +134,55 @@ def compress_pdf(file_obj, mode, quality):
         pdf = pikepdf.Pdf.open(file_obj)
         
         num_images_processed = 0
+        num_images_skipped = 0
 
-        # Iterate through pages and images
-        for i, page in enumerate(pdf.pages):
+        for page in pdf.pages:
             for name in list(page.images.keys()):
                 try:
                     img_obj = page.images[name]
-                    # Attempt to convert to a PIL Image more robustly
                     pil_image = Image.open(io.BytesIO(img_obj.obj.read_bytes()))
+                    
+                    # Heuristic to decide if an image should be downsampled
+                    # Longest side of an A4 page is ~11.7 inches.
+                    # Max pixel dimension = target_ppi * page_dimension
+                    max_pixels = target_ppi * 12 # Assume max page dimension of 12 inches
+                    
+                    if max(pil_image.width, pil_image.height) <= max_pixels:
+                        # Image is already small enough, no need to downsample
+                        continue
 
-                    # Convert RGBA or Palette modes to RGB as JPEG doesn't support alpha
-                    if pil_image.mode in ('RGBA', 'P'):
-                        pil_image = pil_image.convert('RGB')
+                    # Downsample the image
+                    scale_ratio = max_pixels / max(pil_image.width, pil_image.height)
+                    new_width = int(pil_image.width * scale_ratio)
+                    new_height = int(pil_image.height * scale_ratio)
+                    
+                    resized_image = pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                    # Convert RGBA/P to RGB as JPEG doesn't support alpha
+                    if resized_image.mode in ('RGBA', 'P'):
+                        resized_image = resized_image.convert('RGB')
 
                     # Re-compress image to JPEG format in memory
                     buffer = io.BytesIO()
-                    pil_image.save(buffer, format="jpeg", quality=quality, optimize=True)
+                    resized_image.save(buffer, format="jpeg", quality=quality, optimize=True)
                     
                     # Replace the old image with the new compressed one
-                    new_image_obj = pikepdf.Image(pdf, buffer)
-                    page.images[name] = new_image_obj
+                    page.images[name] = pikepdf.Image(pdf, buffer)
                     num_images_processed += 1
 
                 except Exception as e:
-                    # Skip images that cause errors (e.g., unsupported formats, masks)
-                    st.warning(f"Skipped an image on page {i+1} that could not be processed. Info: {e}")
+                    num_images_skipped += 1
+                    print(f"Skipping an image due to error: {e}")
                     continue
+        
+        if num_images_skipped > 0:
+            st.warning(f"Skipped {num_images_skipped} image(s) that could not be processed (e.g., masks or unsupported formats).")
 
         # --- Mode-specific optimizations ---
-        save_options = {
-            "compress_streams": True,
-            "linearize": True,
-        }
-        
+        save_options = {"compress_streams": True, "linearize": True}
         if mode == 'Extreme':
             try:
-                del pdf.docinfo # Remove metadata
+                del pdf.docinfo
             except KeyError:
                 pass
 
@@ -181,7 +194,6 @@ def compress_pdf(file_obj, mode, quality):
 
         if compressed_size >= original_size:
             st.session_state.compression_stats = {
-                'original_size_str': format_bytes(original_size),
                 'info': f"This PDF seems to be highly optimized. New size ({format_bytes(compressed_size)}) is not smaller. Processed {num_images_processed} image(s)."
             }
             st.session_state.compressed_pdf = None
