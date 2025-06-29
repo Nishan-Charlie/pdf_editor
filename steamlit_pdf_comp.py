@@ -7,7 +7,7 @@ from PIL import Image
 # --- Page Configuration ---
 st.set_page_config(
     page_title="PDF Compressor Pro",
-    page_icon="�",
+    page_icon="📄",
     layout="centered",
     initial_sidebar_state="auto",
 )
@@ -84,14 +84,21 @@ def main():
         
         st.header("Compression Results")
         
+        # Priority 1: Check for and display any errors
         if stats.get('error'):
             st.error(stats['error'])
-        # Check if compression was successful before showing metrics
-        elif stats.get('compressed_size_str'):
+        
+        # Priority 2: Check for and display info messages (e.g., already optimized)
+        elif stats.get('info'):
+            st.info(stats['info'])
+        
+        # If no error and no info, then it must be a successful compression
+        else:
+            # This block now only runs on success, so all keys should exist.
             col1, col2, col3 = st.columns(3)
-            col1.metric("Original Size", stats['original_size_str'])
-            col2.metric("Compressed Size", stats['compressed_size_str'])
-            col3.metric("Space Saved", f"{stats['savings_str']} ({stats['reduction_ratio']:.1f}%)")
+            col1.metric("Original Size", stats.get('original_size_str', 'N/A'))
+            col2.metric("Compressed Size", stats.get('compressed_size_str', 'N/A'))
+            col3.metric("Space Saved", f"{stats.get('savings_str', 'N/A')} ({stats.get('reduction_ratio', 0.0):.1f}%)")
 
             if st.session_state.compressed_pdf:
                 original_name = st.session_state.original_filename.replace('.pdf', '')
@@ -101,10 +108,6 @@ def main():
                     file_name=f"{original_name}_compressed.pdf",
                     mime="application/pdf",
                 )
-        # Handle the case where the file was already optimized
-        elif stats.get('info'):
-            st.info(stats['info'])
-
 
 # --- Helper & Core Logic Functions ---
 def format_bytes(byte_count):
@@ -137,7 +140,7 @@ def compress_pdf(file_obj, mode, quality):
             for name in list(page.images.keys()):
                 try:
                     img_obj = page.images[name]
-                    # Attempt to convert to a PIL Image
+                    # Attempt to convert to a PIL Image more robustly
                     pil_image = Image.open(io.BytesIO(img_obj.obj.read_bytes()))
 
                     # Convert RGBA or Palette modes to RGB as JPEG doesn't support alpha
@@ -193,7 +196,7 @@ def compress_pdf(file_obj, mode, quality):
             
     except Exception as e:
         st.session_state.compression_stats = {
-            'error': f"An error occurred: {e}. The PDF might be encrypted or corrupted."
+            'error': f"An error occurred: {e}. The PDF might be encrypted, corrupted, or have an unsupported format."
         }
         st.session_state.compressed_pdf = None
         print(f"Error compressing PDF: {e}")
