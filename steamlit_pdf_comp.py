@@ -2,6 +2,7 @@ import streamlit as st
 import pikepdf
 import io
 import math
+from PIL import Image
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -12,7 +13,7 @@ st.set_page_config(
 )
 
 # --- App State Management ---
-# Initialize session state variables to ensure they persist across reruns.
+# Using session state to hold data across reruns
 def initialize_state():
     if 'compressed_pdf' not in st.session_state:
         st.session_state.compressed_pdf = None
@@ -20,15 +21,12 @@ def initialize_state():
         st.session_state.original_filename = None
     if 'compression_stats' not in st.session_state:
         st.session_state.compression_stats = {}
-    if 'processing' not in st.session_state:
-        st.session_state.processing = False
 
-# Function to reset the state, e.g., when a new file is uploaded
+# Function to reset the state when a new file is uploaded
 def reset_state():
     st.session_state.compressed_pdf = None
     st.session_state.original_filename = None
     st.session_state.compression_stats = {}
-    st.session_state.processing = False
 
 # --- UI Rendering ---
 def main():
@@ -36,55 +34,51 @@ def main():
     initialize_state()
 
     st.title("📄 PDF Compressor Pro")
-    st.subheader("Reduce PDF file size efficiently without compromising too much on quality.")
+    st.subheader("Reduce PDF file size by optimizing images within the document.")
 
     # File uploader
     uploaded_file = st.file_uploader(
-        "Choose a PDF file",
+        "Choose a PDF file to compress",
         type="pdf",
-        on_change=reset_state  # Reset when a new file is uploaded
+        on_change=reset_state  # Reset state when a new file is chosen
     )
 
     if uploaded_file is not None:
-        # Once a file is uploaded, show compression options
         st.sidebar.header("Compression Settings")
 
-        # Define compression modes and their corresponding default PPI settings
+        # Simplified modes with clearer explanations
         mode_settings = {
-            "Balanced": {"ppi": 150, "info": "Good balance between size and quality (150 PPI)."},
-            "Aggressive": {"ppi": 100, "info": "Smaller size, noticeable quality loss (100 PPI)."},
-            "Extreme": {"ppi": 72, "info": "Lowest quality, smallest size (72 PPI). Also removes metadata."},
+            "Balanced": {"quality": 80, "info": "Good balance between size and quality."},
+            "Aggressive": {"quality": 65, "info": "Noticeable quality loss, smaller size."},
+            "Extreme": {"quality": 50, "info": "Significant quality loss, smallest size. Also removes metadata."},
         }
 
         compression_mode = st.sidebar.radio(
             "Select a compression mode:",
             options=list(mode_settings.keys()),
-            index=0, # Default to 'Balanced'
-            help="Higher PPI means better quality but larger file size."
+            index=0,
+            help="This sets a baseline for image quality."
         )
         
         st.sidebar.info(mode_settings[compression_mode]["info"])
         
-        # Allow fine-tuning of image quality (PPI)
-        image_ppi = st.sidebar.slider(
-            "Fine-tune Image Quality (PPI)",
-            min_value=50,
-            max_value=300,
-            value=mode_settings[compression_mode]["ppi"],
-            step=10,
-            help="Pixels Per Inch. Lower values reduce image quality and file size."
+        # More intuitive image quality slider
+        image_quality = st.sidebar.slider(
+            "Fine-tune Image Quality (%)",
+            min_value=10,
+            max_value=95,
+            value=mode_settings[compression_mode]["quality"],
+            step=5,
+            help="The quality of JPEG images after compression. Lower values mean smaller file size."
         )
 
-        # Button to trigger the compression process
-        if st.button("Compress PDF"):
-            st.session_state.processing = True
+        # Button to start the compression
+        if st.button(f"Compress PDF ({compression_mode})"):
             st.session_state.original_filename = uploaded_file.name
-            
-            with st.spinner(f"Compressing with '{compression_mode}' mode..."):
-                compress_pdf(uploaded_file, compression_mode, image_ppi)
+            with st.spinner("Optimizing images and compressing PDF..."):
+                compress_pdf(uploaded_file, compression_mode, image_quality)
 
     # --- Display Results ---
-    # Show results only after processing is complete
     if st.session_state.get('compression_stats'):
         stats = st.session_state.compression_stats
         
@@ -98,7 +92,6 @@ def main():
             col2.metric("Compressed Size", stats['compressed_size_str'])
             col3.metric("Space Saved", f"{stats['savings_str']} ({stats['reduction_ratio']:.1f}%)")
 
-            # Provide the download button if compression was successful
             if st.session_state.compressed_pdf:
                 original_name = st.session_state.original_filename.replace('.pdf', '')
                 st.download_button(
@@ -109,7 +102,6 @@ def main():
                 )
             elif stats.get('info'):
                 st.info(stats['info'])
-
 
 # --- Helper & Core Logic Functions ---
 def format_bytes(byte_count):
@@ -122,67 +114,71 @@ def format_bytes(byte_count):
     s = round(byte_count / p, 2)
     return f"{s} {size_name[i]}"
 
-def compress_pdf(file_obj, mode, ppi):
+def compress_pdf(file_obj, mode, quality):
     """
-    Core function to perform PDF compression using pikepdf.
+    Core function to compress a PDF using pikepdf and Pillow.
     
     Args:
         file_obj (BytesIO): The uploaded PDF file object.
-        mode (str): The selected compression mode ('Balanced', 'Aggressive', 'Extreme').
-        ppi (int): The target PPI for image downsampling.
+        mode (str): The selected compression mode.
+        quality (int): The target JPEG quality for images (1-95).
     """
     try:
         original_size = file_obj.getbuffer().nbytes
         pdf = pikepdf.Pdf.open(file_obj)
+        
+        num_images_processed = 0
 
-        # --- Key Compression Step: Image Downsampling ---
-        # This is the most effective way to reduce size in PDFs with images.
-        for page in pdf.pages:
-            for name, image in page.images.items():
-                # Only attempt to re-encode if it's a raw image or can be improved
-                raw_image = pikepdf.RawImage(image)
-                if raw_image:
-                    page.images[name] = pdf.make_image(
-                        raw_image,
-                        width=raw_image.width,
-                        height=raw_image.height,
-                        ppi=ppi
-                    )
+        # Iterate through pages and images
+        for i, page in enumerate(pdf.pages):
+            for name in list(page.images.keys()):
+                try:
+                    img_obj = page.images[name]
+                    pil_image = img_obj.as_pil_image()
+
+                    # Convert RGBA to RGB as JPEG doesn't support alpha
+                    if pil_image.mode in ('RGBA', 'P'):
+                        pil_image = pil_image.convert('RGB')
+
+                    # Re-compress image to JPEG format in memory
+                    buffer = io.BytesIO()
+                    pil_image.save(buffer, format="jpeg", quality=quality, optimize=True)
+                    
+                    # Replace the old image with the new compressed one
+                    new_image_obj = pikepdf.Image(pdf, buffer)
+                    page.images[name] = new_image_obj
+                    num_images_processed += 1
+
+                except Exception as e:
+                    # Skip images that cause errors (e.g., unsupported formats)
+                    print(f"Skipping an image on page {i+1} due to error: {e}")
+                    continue
 
         # --- Mode-specific optimizations ---
         save_options = {
             "compress_streams": True,
-            "linearize": True, # Optimizes for web viewing
-            "deterministic_id": True # Helps with consistent output
+            "linearize": True,
         }
         
         if mode == 'Extreme':
-            # Remove metadata for additional savings
             try:
-                del pdf.docinfo
+                del pdf.docinfo # Remove metadata
             except KeyError:
-                pass # No docinfo to delete
-            
-            # This is an aggressive option that can break some PDFs, use with caution.
-            # It removes things like form fields, annotations, etc.
-            # pdf.flatten() 
+                pass
 
-        # Save the compressed PDF to a buffer in memory
         buffer = io.BytesIO()
         pdf.save(buffer, **save_options)
         pdf.close()
         
         compressed_size = buffer.getbuffer().nbytes
 
-        # --- CRITICAL CHECK: Ensure file size was actually reduced ---
         if compressed_size >= original_size:
             st.session_state.compression_stats = {
                 'original_size_str': format_bytes(original_size),
-                'info': f"This PDF is already highly optimized. The compressed file ({format_bytes(compressed_size)}) is not smaller than the original."
+                'info': f"This PDF seems to be highly optimized already. The new file size ({format_bytes(compressed_size)}) is not smaller. No images were changed."
             }
-            st.session_state.compressed_pdf = None # No file to download
+            st.session_state.compressed_pdf = None
         else:
-            # Successful compression
             st.session_state.compressed_pdf = buffer.getvalue()
             st.session_state.compression_stats = {
                 'original_size_str': format_bytes(original_size),
@@ -192,13 +188,11 @@ def compress_pdf(file_obj, mode, ppi):
             }
             
     except Exception as e:
-        # Handle errors during processing
         st.session_state.compression_stats = {
-            'error': f"An error occurred: {e}. The PDF might be corrupted or encrypted."
+            'error': f"An error occurred: {e}. The PDF might be encrypted or corrupted."
         }
         st.session_state.compressed_pdf = None
         print(f"Error compressing PDF: {e}")
 
 if __name__ == "__main__":
     main()
-
